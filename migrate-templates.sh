@@ -1,69 +1,24 @@
 #!/bin/bash
 
-# Load variables
-source ./variables.sh
+# Parameters passed from the Azure Pipeline
+LOCAL_TEMPLATES_PATH=$1
+SHAREPOINT_SITE_URL=$2
+DOCUMENT_LIBRARY=$3
+ACCESS_TOKEN=$4
 
-# Function to authenticate to SharePoint and get access token
-get_access_token() {
-  token=$(curl -X POST \
-    -d "client_id=$CLIENT_ID" \
-    -d "scope=https://graph.microsoft.com/.default" \
-    -d "client_secret=$CLIENT_SECRET" \
-    -d "grant_type=client_credentials" \
-    "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" | jq -r .access_token)
-  echo "$token"
-}
+# Loop through the local template files and upload them to SharePoint
+echo "Starting migration of templates from '$LOCAL_TEMPLATES_PATH' to '$SHAREPOINT_SITE_URL/$DOCUMENT_LIBRARY'."
 
-# Function to upload files to SharePoint
-upload_file() {
-  local file_path=$1
-  local relative_path=$2
-  local folder_path=$3
+find $LOCAL_TEMPLATES_PATH -type f | while read template_file; do
+    # Get the local folder structure
+    folder_path=$(dirname "$template_file")
+    sharepoint_folder_path=$(echo $folder_path | sed "s|$LOCAL_TEMPLATES_PATH/||" | sed "s|/|\\|g")  # Convert to SharePoint path format
 
-  # Get the SharePoint folder ID (create folder if not exists)
-  folder_id=$(curl -X GET \
-    -H "Authorization: Bearer $1" \
-    "https://graph.microsoft.com/v1.0/sites/$(basename $SHAREPOINT_SITE_URL)/drives/$(get_drive_id)/root:/$DOCUMENT_LIBRARY/$folder_path:/children" | jq -r '.value[0].id')
+    # Upload the file to SharePoint
+    echo "Uploading $template_file to SharePoint folder '$sharepoint_folder_path'."
+    curl -X PUT -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -F "file=@$template_file" \
+        "https://$SHAREPOINT_SITE_URL/_api/web/GetFolderByServerRelativeUrl('/sites/yoursite/$DOCUMENT_LIBRARY/$sharepoint_folder_path')/Files/add(url='$(basename $template_file)', overwrite=true)"
+done
 
-  if [[ "$folder_id" == "null" || "$folder_id" == "" ]]; then
-    # Create folder if it doesn't exist
-    create_folder $folder_path
-  fi
-
-  # Upload file to SharePoint
-  curl -X PUT \
-    -H "Authorization: Bearer $token" \
-    -T "$file_path" \
-    "https://graph.microsoft.com/v1.0/sites/$(basename $SHAREPOINT_SITE_URL)/drives/$(get_drive_id)/items/$folder_id:/$(basename $file_path):/content"
-}
-
-# Function to get the SharePoint drive ID
-get_drive_id() {
-  curl -X GET \
-    -H "Authorization: Bearer $token" \
-    "https://graph.microsoft.com/v1.0/sites/$(basename $SHAREPOINT_SITE_URL)/drives" | jq -r '.value[0].id'
-}
-
-# Function to create folder in SharePoint
-create_folder() {
-  local folder_path=$1
-
-  curl -X POST \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d '{"parentReference": {"id": "/root"}, "name": "'$folder_path'"}' \
-    "https://graph.microsoft.com/v1.0/sites/$(basename $SHAREPOINT_SITE_URL)/drives/$(get_drive_id())/root/children"
-}
-
-# Loop through the local templates folder and upload files
-upload_templates() {
-  for file_path in $(find $LOCAL_TEMPLATES_PATH -type f); do
-    relative_path=$(echo $file_path | sed "s|$LOCAL_TEMPLATES_PATH/||g")
-    folder_path=$(dirname "$relative_path")
-    upload_file "$file_path" "$relative_path" "$folder_path"
-  done
-}
-
-# Get access token and upload the files
-token=$(get_access_token)
-upload_templates
+echo "Template migration completed successfully."
