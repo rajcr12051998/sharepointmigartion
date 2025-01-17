@@ -1,44 +1,71 @@
 trigger:
   branches:
     include:
-      - main
+      - main  # Trigger the pipeline when changes are pushed to the 'main' branch
 
 pool:
-  vmImage: 'ubuntu-latest'
+  vmImage: 'ubuntu-latest'  # Define the agent pool (ubuntu-latest)
 
-steps:
-# Step 1: Install necessary tools
-- task: Bash@3
-  displayName: 'Install jq and curl'
-  inputs:
-    targetType: 'inline'
-    script: |
-      sudo apt-get update
-      sudo apt-get install -y jq curl
+variables:
+  - template: variables.yml  # Import external variables file
 
-# Step 2: Set up environment variables
-- task: Bash@3
-  displayName: 'Set up environment variables'
-  inputs:
-    targetType: 'inline'
-    script: |
-      echo "##vso[task.setvariable variable=TENANT_ID]$(TENANT_ID)"
-      echo "##vso[task.setvariable variable=CLIENT_ID]$(CLIENT_ID)"
-      echo "##vso[task.setvariable variable=CLIENT_SECRET]$(CLIENT_SECRET)"
-      echo "##vso[task.setvariable variable=SHAREPOINT_SITE_URL]$(SHAREPOINT_SITE_URL)"
-      echo "##vso[task.setvariable variable=DOCUMENT_LIBRARY]$(DOCUMENT_LIBRARY)"
-      echo "##vso[task.setvariable variable=LOCAL_TEMPLATES_PATH]$(Build.SourcesDirectory)/templates"
+stages:
+  - stage: MigrationAndEmail
+    displayName: 'Migrate Templates and Send Email Notifications'
+    jobs:
+      - job: MigrateAndNotify
+        displayName: 'Migration and Email Notification'
+        steps:
+          - task: UseDotNet@2
+            displayName: 'Install .NET SDK'
+            inputs:
+              packageType: 'sdk'
+              version: '6.x'  # .NET version to be used for any further operations
 
-# Step 3: Run the migration script
-- task: Bash@3
-  displayName: 'Run Migration Script'
-  inputs:
-    targetType: 'filePath'
-    filePath: './migrate-templates.sh'
+          - task: Bash@3
+            displayName: 'Install Dependencies'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sudo apt-get update
+                sudo apt-get install -y jq curl  # Install necessary dependencies for the script
 
-# Step 4: Run the validation script
-- task: Bash@3
-  displayName: 'Validate Migration'
-  inputs:
-    targetType: 'filePath'
-    filePath: './validate-migration.sh'
+          # Step 1: Authenticate to SharePoint using OAuth2
+          - task: AzureCLI@2
+            displayName: 'Authenticate to SharePoint'
+            inputs:
+              azureSubscription: '$(AzureServiceConnection)'  # Define your Azure Service connection
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Authenticating with SharePoint using client credentials."
+                access_token=$(curl -X POST https://accounts.accesscontrol.windows.net/$(SP_TENANT_ID)/tokens/OAuth/2 \
+                  -d "grant_type=client_credentials&client_id=$(SP_CLIENT_ID)&client_secret=$(SP_CLIENT_SECRET)&resource=https://$(SHAREPOINT_SITE_URL)" \
+                  -H "Content-Type: application/x-www-form-urlencoded" | jq -r .access_token)
+                echo "##vso[task.setvariable variable=ACCESS_TOKEN]$access_token"  # Set access token as a pipeline variable
+
+          # Step 2: Migrate Templates to SharePoint
+          - task: Bash@3
+            displayName: 'Migrate Templates to SharePoint'
+            inputs:
+              targetType: 'inline'
+              script: |
+                ./migrate-templates.sh $(LOCAL_TEMPLATES_PATH) $(SHAREPOINT_SITE_URL) $(DOCUMENT_LIBRARY) $(ACCESS_TOKEN)
+
+          # Step 3: Send Success Email Notification (if migration succeeds)
+          - task: Bash@3
+            displayName: 'Send Success Email'
+            condition: succeeded()
+            inputs:
+              targetType: 'inline'
+              script: |
+                ./send-email.sh "Migration completed successfully" "The templates have been migrated to SharePoint successfully." "Migration Status: Success"
+
+          # Step 4: Send Failure Email Notification (if migration fails)
+          - task: Bash@3
+            displayName: 'Send Failure Email'
+            condition: failed()
+            inputs:
+              targetType: 'inline'
+              script: |
+                ./send-email.sh "Migration failed" "The template migration to SharePoint has failed. Please check the logs for details." "Migration Status: Failed"
